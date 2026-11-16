@@ -37,10 +37,12 @@ python3 epson_et2810_reset.py temp-reset 192.168.1.50
 ```
 
 - `restore` writes a backup file back, undoing a reset.
-- `temp-reset` asks the firmware for its own temporary reset without writing to
-  the EEPROM. Try it if `reset` reports that the printer refuses or discards
-  writes (some firmware versions lock the EEPROM). Add `--serial XXXXXXXXXX`
-  with the serial from the printer's label if it cannot be read automatically.
+- `temp-reset` asks the firmware to clear the "pad full" error without writing
+  to the EEPROM. Use it when `status` or `reset` says the firmware blocks
+  EEPROM access over the network (recent firmware does). It lasts only until
+  the printer is switched off, so leave the printer on and run it again after
+  each power-on. Add `--serial XXXXXXXXXX` with the serial from the printer's
+  label if it cannot be read automatically.
 
 ## Before you reset
 

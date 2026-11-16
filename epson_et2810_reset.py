@@ -221,8 +221,39 @@ class Printer:
                 "address %d still reads %d after writing %d - this firmware "
                 "discards EEPROM writes" % (address, actual, value))
 
+    def eeprom_locked(self):
+        """True if this firmware refuses EEPROM access over the network."""
+        try:
+            self.read(next(iter(RESET_VALUES)))
+        except PrinterError:
+            return True
+        return False
+
+    def status_block(self):
+        """Return the printer's status fields as {field id: bytes}."""
+        data = self.ctrl("st", [1]) or b""
+        start = data.find(b"BDC ST2\r\n")
+        if start < 0:
+            raise PrinterError("printer did not return a status block")
+        data = data[start + 9:]
+        end = 2 + int.from_bytes(data[:2], "little")
+        fields, pos = {}, 2
+        while pos + 2 <= min(end, len(data)):
+            fields[data[pos]] = data[pos + 2:pos + 2 + data[pos + 1]]
+            pos += 2 + data[pos + 1]
+        return fields
+
     def serial(self):
-        return "".join(chr(self.read(a)) for a in SERIAL_ADDRESSES)
+        """Serial number, from the EEPROM or else from the status block."""
+        try:
+            return "".join(chr(self.read(a)) for a in SERIAL_ADDRESSES)
+        except PrinterError:
+            serial = self.status_block().get(0x40, b"").decode("latin-1").strip()
+            if not serial:
+                raise PrinterError(
+                    "cannot read the serial number; pass it with --serial "
+                    "(it is on the label on the back of the printer)")
+            return serial
 
     def waste_levels(self):
         levels = {}
@@ -259,6 +290,33 @@ def print_levels(printer):
         print("  %-15s %6.1f %%" % (name, percent))
 
 
+LOCKED_MESSAGE = (
+    "this printer's firmware blocks EEPROM access over the network, so the "
+    "permanent reset cannot be done over Wi-Fi. Use 'temp-reset' instead.")
+
+PRINTER_STATES = {0: "Error", 1: "Self printing", 2: "Busy", 3: "Waiting",
+                  4: "Idle (ready to print)", 5: "Paused", 7: "Cleaning"}
+ERROR_CODES = {0x00: "Fatal error", 0x02: "Cover open", 0x04: "Paper jam",
+               0x05: "Ink out", 0x06: "Paper out",
+               0x10: "Waste ink pad counter overflow",
+               0x41: "Maintenance request", 0x47: "Printing disabled"}
+PAD_STATES = {0: "not full", 1: "nearly full", 2: "FULL"}
+
+
+def print_status_block(printer):
+    fields = printer.status_block()
+    if 0x01 in fields:
+        code = fields[0x01][0]
+        print("Printer state : %s" % PRINTER_STATES.get(code, "code %d" % code))
+    if 0x02 in fields:
+        code = fields[0x02][0]
+        print("Error         : %s" % ERROR_CODES.get(code, "code 0x%02x" % code))
+    box = fields.get(0x37, b"")
+    if box and box[0] in (1, 2):
+        for n, i in enumerate(range(1, len(box), box[0]), 1):
+            print("Waste pad %d   : %s" % (n, PAD_STATES.get(box[i], "code %d" % box[i])))
+
+
 def confirm(args, prompt):
     if args.yes:
         return
@@ -269,6 +327,10 @@ def confirm(args, prompt):
 def cmd_status(printer, args):
     check_model(printer, force=True)
     print("Serial number : %s" % printer.serial())
+    print_status_block(printer)
+    if printer.eeprom_locked():
+        print("Counters      : not readable - " + LOCKED_MESSAGE)
+        return
     print("Waste ink counters:")
     print_levels(printer)
     flag = printer.read(0x100)
@@ -277,6 +339,8 @@ def cmd_status(printer, args):
 
 def cmd_reset(printer, args):
     check_model(printer, args.force)
+    if printer.eeprom_locked():
+        raise PrinterError(LOCKED_MESSAGE)
     print("Current waste ink counters:")
     print_levels(printer)
 
@@ -302,6 +366,8 @@ def cmd_reset(printer, args):
 
 def cmd_restore(printer, args):
     check_model(printer, args.force)
+    if printer.eeprom_locked():
+        raise PrinterError(LOCKED_MESSAGE)
     with open(args.file) as fh:
         cells = {int(a): int(v) for a, v in json.load(fh)["cells"].items()}
     allowed = set(RESET_VALUES) | set(COMMIT_MASKS)
@@ -319,7 +385,10 @@ def cmd_temp_reset(printer, args):
     serial = args.serial or printer.serial()
     print("Serial number : %s" % serial)
     if printer.temp_reset(serial):
-        print("Printer accepted the temporary reset. Switch it off and on again.")
+        print("Printer accepted the temporary reset. Do NOT switch it off: the "
+              "reset lasts only until the printer is powered off. Run this "
+              "command again after each power-on.")
+        print_status_block(printer)
     else:
         raise PrinterError("printer did not accept the temporary reset")
 
@@ -354,7 +423,7 @@ def main(argv=None):
     p.add_argument("file", help="backup file made by 'reset'")
     add_writing(p)
     p = add("temp-reset", cmd_temp_reset,
-            "ask the firmware for a temporary reset (no EEPROM write)")
+            "clear the pad-full error until the printer is switched off")
     p.add_argument("--serial", help="serial number from the printer's label, "
                                     "if it cannot be read automatically")
     p.add_argument("--force", action="store_true",

@@ -31,7 +31,9 @@ class FakePrinter(threading.Thread):
     """UDP server that decodes SNMP GETs independently of the tool's encoder."""
 
     def __init__(self, model="EPSON ET-2810 Series", discard_writes=False,
-                 bind="127.0.0.1"):
+                 bind="127.0.0.1", locked=False):
+        self.locked = locked
+        self.pad_full = True
         super().__init__(daemon=True)
         self.model = model
         self.discard_writes = discard_writes
@@ -80,7 +82,17 @@ class FakePrinter(threading.Thread):
         cmd = bytes(oid[len(PREFIX):])
         name, length, body = cmd[:2], cmd[2] | cmd[3] << 8, cmd[4:]
         assert length == len(body)
+        if name == b"st":
+            assert body == b"\x01"
+            fields = (bytes([0x01, 1, 0 if self.pad_full else 4])
+                      + (bytes([0x02, 1, 0x10]) if self.pad_full else b"")
+                      + bytes([0x37, 3, 1, 2 if self.pad_full else 0, 0])
+                      + bytes([0x40, len(SERIAL)]) + SERIAL.encode())
+            return (b"\x00@BDC ST2\r\n" + len(fields).to_bytes(2, "little")
+                    + fields)
         if name == b"||":
+            if self.locked:
+                return b"\x00||:41:NA;\x0c"
             if tuple(body[:2]) != (74, 54):
                 return b"\x00@BDC PS\r\n||:41:NA;\x0c"
             address = body[5] | body[6] << 8
@@ -96,6 +108,7 @@ class FakePrinter(threading.Thread):
         if name == b"rw":
             if body == b"\x01\x00" + hashlib.sha1(SERIAL.encode()).digest():
                 self.temp_resets += 1
+                self.pad_full = False
                 return b"\x00@BDC PS\r\nrw:01:OK;\x0c"
             return b"\x00@BDC PS\r\nrw:01:NA;\x0c"
         raise AssertionError("unexpected command %r" % cmd)
@@ -171,6 +184,23 @@ class ToolTest(unittest.TestCase):
         self.assertEqual(self.run_tool(fake, "temp-reset"), 0)
         self.assertEqual(fake.temp_resets, 1)
         self.assertEqual(self.run_tool(fake, "temp-reset", "--serial", "WRONG"), 1)
+
+    def test_locked_firmware(self):
+        fake = self.start(locked=True)
+        before = dict(fake.eeprom)
+        printer = tool.Printer("127.0.0.1", fake.port, timeout=1)
+        self.assertTrue(printer.eeprom_locked())
+        self.assertEqual(printer.serial(), SERIAL)
+        self.assertEqual(printer.status_block()[0x37], bytes([1, 2, 0]))
+        self.assertEqual(self.run_tool(fake, "status"), 0)
+        backup = os.path.join(tempfile.mkdtemp(), "b.json")
+        self.assertEqual(
+            self.run_tool(fake, "reset", "--yes", "--backup", backup), 1)
+        self.assertFalse(os.path.exists(backup))
+        self.assertEqual(self.run_tool(fake, "temp-reset"), 0)
+        self.assertEqual(fake.temp_resets, 1)
+        self.assertFalse(fake.pad_full)
+        self.assertEqual(fake.eeprom, before)
 
     def test_windows_style_addresses(self):
         self.assertEqual(
