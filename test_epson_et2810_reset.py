@@ -30,7 +30,8 @@ def decode_oid(payload):
 class FakePrinter(threading.Thread):
     """UDP server that decodes SNMP GETs independently of the tool's encoder."""
 
-    def __init__(self, model="EPSON ET-2810 Series", discard_writes=False):
+    def __init__(self, model="EPSON ET-2810 Series", discard_writes=False,
+                 bind="127.0.0.1"):
         super().__init__(daemon=True)
         self.model = model
         self.discard_writes = discard_writes
@@ -40,8 +41,10 @@ class FakePrinter(threading.Thread):
         for i, ch in enumerate(SERIAL):
             self.eeprom[1604 + i] = ord(ch)
         self.temp_resets = 0
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind(("127.0.0.1", 0))
+        self.sock = socket.socket(
+            socket.AF_INET6 if ":" in bind else socket.AF_INET,
+            socket.SOCK_DGRAM)
+        self.sock.bind((bind, 0))
         self.port = self.sock.getsockname()[1]
 
     def run(self):
@@ -168,6 +171,24 @@ class ToolTest(unittest.TestCase):
         self.assertEqual(self.run_tool(fake, "temp-reset"), 0)
         self.assertEqual(fake.temp_resets, 1)
         self.assertEqual(self.run_tool(fake, "temp-reset", "--serial", "WRONG"), 1)
+
+    def test_windows_style_addresses(self):
+        self.assertEqual(
+            tool.clean_host("http://[fe80::a6d7:3cff:fe20:f2f%19]:80/WSD/DEVICE"),
+            "fe80::a6d7:3cff:fe20:f2f%19")
+        self.assertEqual(tool.clean_host("http://192.168.1.50:80/WSD/DEVICE"),
+                         "192.168.1.50")
+        self.assertEqual(tool.clean_host(" 192.168.1.50 "), "192.168.1.50")
+        self.assertEqual(tool.clean_host("fe80::1%19"), "fe80::1%19")
+
+    def test_ipv6(self):
+        try:
+            fake = self.start(bind="::1")
+        except OSError:
+            self.skipTest("IPv6 not available")
+        url = "http://[::1]:80/WSD/DEVICE"
+        self.assertEqual(tool.main(["status", url, "--port", str(fake.port),
+                                    "--timeout", "1"]), 0)
 
     def test_no_printer(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

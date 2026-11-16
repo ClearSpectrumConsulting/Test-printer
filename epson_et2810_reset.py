@@ -130,12 +130,32 @@ def parse_response(packet):
             value if vtag == 0x04 else None)
 
 
+def clean_host(text):
+    """Accept a bare address or one pasted from Windows, such as
+    http://[fe80::1234%19]:80/WSD/DEVICE, and return just the address."""
+    text = text.strip()
+    match = re.search(r"\[([^\]]+)\]", text)
+    if match:
+        return match.group(1)
+    if "://" in text:
+        text = text.split("://", 1)[1].split("/", 1)[0]
+        if text.count(":") == 1:
+            text = text.split(":")[0]
+    return text
+
+
 class Printer:
     def __init__(self, host, port=161, timeout=3.0, retries=3):
-        self.addr = (host, port)
+        host = clean_host(host)
+        try:
+            family, kind, proto, _, self.addr = socket.getaddrinfo(
+                host, port, type=socket.SOCK_DGRAM)[0]
+        except OSError as exc:
+            raise PrinterError("cannot resolve address %r: %s" % (host, exc))
+        self.host = host
         self.timeout = timeout
         self.retries = retries
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock = socket.socket(family, kind, proto)
 
     def get(self, oid):
         """SNMP GET; returns the OCTET STRING value (bytes) or None."""
@@ -160,8 +180,8 @@ class Printer:
                     continue  # stale reply to an earlier attempt
                 return None if err else value
         raise PrinterError(
-            "no answer from %s:%d - check the IP address and that the printer "
-            "is on, awake and on the same network" % self.addr)
+            "no answer from %s - check the address and that the printer "
+            "is on, awake and on the same network" % self.host)
 
     # --- Epson remote commands ---
 
@@ -312,7 +332,8 @@ def main(argv=None):
 
     def add(name, func, help_text):
         p = sub.add_parser(name, help=help_text)
-        p.add_argument("host", help="printer IP address or hostname")
+        p.add_argument("host", help="printer IP address (IPv4 or IPv6), "
+                                    "hostname, or the address shown by Windows")
         p.add_argument("--port", type=int, default=161, help=argparse.SUPPRESS)
         p.add_argument("--timeout", type=float, default=3.0,
                        help="seconds to wait for each answer (default 3)")

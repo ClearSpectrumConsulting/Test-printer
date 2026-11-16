@@ -9,8 +9,10 @@ an Epson EcoTank ET-2810 (also ET-2811 / 2812 / 2813 / 2814 / 2815 / 2816 /
 - Python 3.8 or newer (Windows, macOS or Linux)
 - The printer connected to the same network as your computer (USB-only is not
   supported)
-- The printer's IP address: print a network status sheet from the printer, or
-  look it up in your router's device list
+- The printer's address: print a network status sheet from the printer, or
+  look it up in your router's device list. The address Windows shows under
+  the printer's properties also works; paste it in quotes, for example
+  `"http://[fe80::a6d7:3cff:fe20:f2f%19]:80/WSD/DEVICE"`
 
 ## Usage
 
